@@ -1,0 +1,5 @@
+cloud_username,cloud_password,username,password,display_name,first_name,last_name,avatar,phone_number1
+user001,SAMPLE_PASSWORD,1001,ACCOUNT_PASSWORD_1001,Example User One,Example,User One,https://example.com/avatar-user001.png,1001
+user002,bcrypt:<bcrypt_hash_for_user002>,1002,ACCOUNT_PASSWORD_1002,Example User Two,Example,User Two,https://example.com/avatar-user002.png,1002
+user003,bcrypt:<bcrypt_hash_for_user003>,1003,ACCOUNT_PASSWORD_1003,Example User Three,Example,User Three,https://example.com/avatar-user003.png,1003
+user004,bcrypt:<bcrypt_hash_for_user004>,1004,ACCOUNT_PASSWORD_1004,Example User Four,Example,User Four,https://example.com/avatar-user004.png,1004
