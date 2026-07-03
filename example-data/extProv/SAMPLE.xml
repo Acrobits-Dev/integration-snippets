@@ -1,0 +1,8 @@
+<account>
+    <title>{display_name}</title>
+    <acrobitsDisplayName>{display_name}</acrobitsDisplayName>
+    <cloud_username>{cloud_username}</cloud_username>
+    <cloud_password>{cloud_password}</cloud_password>
+    <username>{username}</username>
+    <password>{password}</password>
+</account>
