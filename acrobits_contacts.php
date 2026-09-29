@@ -1,137 +1,159 @@
 <?php
-include_once 'helpers.php';
 
-header('Access-Control-Allow-Origin: *');
-header('Access-Control-Allow-Methods: GET, OPTIONS');
-header('Access-Control-Allow-Headers: Content-Type, Cache-Control, Pragma');
-header('Access-Control-Max-Age: 86400');
-header('Vary: Origin');
+require_once __DIR__ . '/helpers.php';
 
-if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
-    http_response_code(204);
-    exit();
+if (!in_array($_SERVER['REQUEST_METHOD'], array('GET', 'POST'), true)) {
+    header('Allow: GET, POST');
+    reportJsonError(405, 'Method not allowed');
 }
 
-if (isset($_GET['cloud_username']) && isset($_GET['cloud_id'])) {
-    $cloud_username = $_GET['cloud_username'];
-    $cloud_id = $_GET['cloud_id'];
+$requestParams = $_SERVER['REQUEST_METHOD'] === 'POST' ? $_POST : $_GET;
+$requiredParameters = array('cloud_id', 'cloud_username', 'cloud_password');
 
-    // treat editable and live versions the same
-    if (substr($cloud_id, -1) === '*') {
-        $cloud_id = rtrim($cloud_id, '*');
+foreach ($requiredParameters as $parameter) {
+    if (!isset($requestParams[$parameter])
+        || !is_string($requestParams[$parameter])
+        || $requestParams[$parameter] === ''
+    ) {
+        reportJsonError(400, 'Missing required contact parameters');
     }
-    $cloud_id = strtoupper($cloud_id);
+}
 
-    $userFile = findUserList($cloud_id);
-    // Open the CSV file with BOM handling
-    if (($handle = fopenCSVWithBOMHandling($userFile, "r")) !== FALSE) {
-        $columnMapping = getColumnMapping($handle);
+try {
+    $cloudId = normalizeCloudId($requestParams['cloud_id']);
+} catch (InvalidArgumentException $exception) {
+    reportJsonError(400, 'Invalid Cloud ID');
+}
 
-        $jsonContacts = array(); // Initialize the final contacts array
-        $fallbackContactId = 0; // will be used if username not present
-        while (($data = fgetcsv($handle, 1000, ",")) !== FALSE) {
-            
-            // Closure to get data value by column name for the current row
-            $getVal = function($columnName, $default = null) use ($data, $columnMapping) {
-                $columnIndex = $columnMapping[$columnName] ?? null;
-                // Check if column exists in mapping and data row has a value at that index
-                if ($columnIndex !== null && isset($data[$columnIndex])) { 
-                    return $data[$columnIndex];
-                }
+$cloudUsername = (string) $requestParams['cloud_username'];
+$cloudPassword = (string) $requestParams['cloud_password'];
+
+if (!validateUserPassword($cloudId, $cloudUsername, $cloudPassword)) {
+    reportJsonError(403, 'Invalid username or password');
+}
+
+$handle = false;
+
+try {
+    $handle = fopenCSVWithBOMHandling(findUserList($cloudId));
+    if ($handle === false) {
+        throw new RuntimeException('Unable to open the user CSV');
+    }
+
+    $columnMapping = getColumnMapping($handle);
+    requireColumns($columnMapping, array(
+        'cloud_username',
+        'username',
+        'display_name',
+        'first_name',
+        'last_name'
+    ));
+
+    $jsonContacts = array();
+    $seenContactIds = array();
+
+    while (($data = fgetcsv($handle, 0, ',', '"', '\\')) !== false) {
+        $getValue = function ($columnName, $default = '') use ($data, $columnMapping) {
+            if (!array_key_exists($columnName, $columnMapping)) {
                 return $default;
-            };
+            }
 
-            // Helper function to check if a value is valid (not empty and not 'null' string)
-            $isValidValue = function($value) {
-                return !empty($value) && $value !== 'null';
-            };
+            $columnIndex = $columnMapping[$columnName];
+            return isset($data[$columnIndex]) ? $data[$columnIndex] : $default;
+        };
 
-            // Skip if the cloud username matches the one of the user making the request
-            $csvCloudUsername = $getVal('cloud_username');
-            if ($isValidValue($csvCloudUsername) && $csvCloudUsername === $cloud_username) {
+        $isValidValue = function ($value) {
+            return $value !== null && $value !== '' && strcasecmp($value, 'null') !== 0;
+        };
+
+        $csvCloudUsername = $getValue('cloud_username');
+        if ($isValidValue($csvCloudUsername)
+            && strcasecmp($csvCloudUsername, $cloudUsername) === 0
+        ) {
+            continue;
+        }
+
+        $username = $getValue('username');
+        $contactId = $isValidValue($username) ? $username : $csvCloudUsername;
+        if (!$isValidValue($contactId) || isset($seenContactIds[$contactId])) {
+            error_log('Skipping contact with a missing or duplicate contactId');
+            continue;
+        }
+        $seenContactIds[$contactId] = true;
+
+        $contact = array(
+            'fname' => $getValue('first_name'),
+            'lname' => $getValue('last_name'),
+            'displayName' => $getValue('display_name'),
+            'contactId' => $contactId,
+            'contactEntries' => array()
+        );
+
+        if ($isValidValue($csvCloudUsername)) {
+            $contact['cloudUsername'] = $csvCloudUsername;
+            $csvNetworkId = $getValue('networkId');
+            $contact['networkId'] = $isValidValue($csvNetworkId) ? $csvNetworkId : $cloudId;
+        }
+
+        $avatarUrl = $getValue('avatar');
+        if ($isValidValue($avatarUrl)) {
+            $contact['avatar'] = $avatarUrl;
+            $contact['largeAvatar'] = strpos($avatarUrl, 'gravatar.com') !== false
+                ? $avatarUrl . '?s=200'
+                : $avatarUrl;
+        }
+
+        if ($isValidValue($username)) {
+            $contact['contactEntries'][] = array(
+                'entryId' => 'tel:sip',
+                'label' => 'SIP extension',
+                'type' => 'tel',
+                'uri' => $username
+            );
+        }
+
+        $phoneEntryIndex = 1;
+        foreach (array(
+            'phone_number1',
+            'phone_number2',
+            'phone_number3',
+            'phone_number4',
+            'phone_number5'
+        ) as $phoneColumn) {
+            $phoneNumber = $getValue($phoneColumn);
+            if (!$isValidValue($phoneNumber)) {
                 continue;
             }
 
-            $contact_object = [
-                'fname' => $getVal('first_name'),
-                'lname' => $getVal('last_name'),
-                'displayName' => $getVal('display_name'),
-                'contactEntries' => [] // Initialize contactEntries as an empty array
-            ];
+            $phoneNumberParts = explode(':', $phoneNumber, 2);
+            $hasLabel = count($phoneNumberParts) === 2;
+            $label = $hasLabel ? trim($phoneNumberParts[0]) : 'Work';
+            $number = trim($hasLabel ? $phoneNumberParts[1] : $phoneNumberParts[0]);
 
-            // Always ensure contactId - use username if available, otherwise displayName + fallbackContactId
-            $username = $getVal('username');
-            if ($isValidValue($username)) {
-                $contact_object['contactId'] = $username;
-            } else {
-                $displayName = $getVal('display_name') ?: 'Contact';
-                // Strip everything except alphanumeric characters from display name
-                $cleanDisplayName = preg_replace('/[^a-zA-Z0-9]/', '', $displayName);
-                $contact_object['contactId'] = $cleanDisplayName . '_' . $fallbackContactId++;
+            if ($number === '' || $number === $username) {
+                continue;
             }
 
-            // Add cloud username and network ID if cloud username is present
-            if ($isValidValue($csvCloudUsername)) {
-                $contact_object['cloudUsername'] = $csvCloudUsername;
-                $csvNetworkId = $getVal('networkId');
-                $contact_object['networkId'] = $isValidValue($csvNetworkId) ? $csvNetworkId : $cloud_id;
-            }
-            
-            // Add avatar if the column exists and the URL is valid
-            $avatarUrl = $getVal('avatar');
-            if ($isValidValue($avatarUrl)) {
-                $contact_object['avatar'] = $avatarUrl;
-                // Determine largeAvatar URL based on source
-                $contact_object['largeAvatar'] = (strpos($avatarUrl, 'gravatar.com') !== false)
-                    ? $avatarUrl . "?s=200" 
-                    : $avatarUrl;
-            }
-
-            // Add the primary SIP contact entry if username is present
-            if ($isValidValue($username)) {
-                $contact_object['contactEntries'][] = [
-                    "entryId" => "tel:sip",
-                    "label" => "SIP extension",
-                    "type" => "tel",
-                    "uri" => $username
-                ];
-            }
-
-            // Add more numbers if they exist and are valid
-            $phoneEntryIndex = 1;
-            foreach (['phone_number1', 'phone_number2', 'phone_number3', 'phone_number4', 'phone_number5'] as $phoneColumn) {
-                $phoneNumber = $getVal($phoneColumn);
-                // try to split the column data "label:number" into label (optional) and number
-                $phoneNumberParts = explode(':', $phoneNumber);
-                $label = $phoneNumberParts[0] ?? "Work";
-                $number = $phoneNumberParts[1] ?? $phoneNumber;
-                if ($isValidValue($phoneNumber)) {
-                    $contact_object['contactEntries'][] = [
-                        "entryId" => "tel:phone" . $phoneEntryIndex++,
-                        "label" => $label,
-                        "type" => "tel",
-                        "uri" => $number
-                    ];
-                }
-            }
-
-            // Add email addresses if they exist and are valid
-            
-            $jsonContacts[] = $contact_object;
+            $contact['contactEntries'][] = array(
+                'entryId' => 'tel:phone' . $phoneEntryIndex++,
+                'label' => $label !== '' ? $label : 'Work',
+                'type' => 'tel',
+                'uri' => $number
+            );
         }
-        fclose($handle);
 
-        // Return the JSON array
-        header('Content-Type: application/json; charset=utf-8');
-        echo json_encode(array("contacts" => $jsonContacts));
-    } else {
-        // If the CSV file cannot be opened, send an error message
-        header('Content-Type: application/json; charset=utf-8');
-        echo json_encode(array("error" => "Unable to open the CSV file"));
+        $jsonContacts[] = $contact;
     }
-} else {
-    // If required parameters are not provided, send an error message
-    header('Content-Type: application/json; charset=utf-8');
-    echo json_encode(array("error" => "Missing contact username or cloud id"));
+
+    fclose($handle);
+    $handle = false;
+} catch (RuntimeException $exception) {
+    if (is_resource($handle)) {
+        fclose($handle);
+    }
+    error_log($exception->getMessage());
+    reportJsonError(500, 'Contact data is unavailable');
 }
-?>
+
+header('Content-Type: application/json; charset=utf-8');
+echo json_encode(array('contacts' => $jsonContacts), JSON_INVALID_UTF8_SUBSTITUTE);
