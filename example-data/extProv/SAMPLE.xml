@@ -1,8 +1,14 @@
 <account>
     <title>{display_name}</title>
     <acrobitsDisplayName>{display_name}</acrobitsDisplayName>
+    <cloud_id>{cloud_id}</cloud_id>
     <cloud_username>{cloud_username}</cloud_username>
     <cloud_password>{cloud_password}</cloud_password>
     <username>{username}</username>
     <password>{password}</password>
+    <wsContactsUrl>https://customer-domain.example/provisioning/acrobits_contacts.php</wsContactsUrl>
+    <wsContactsMethod>POST</wsContactsMethod>
+    <wsContactsContentType>application/x-www-form-urlencoded</wsContactsContentType>
+    <wsContactsPostData>cloud_id=%account[cloud_id]%&amp;cloud_username=%account[cloud_username]%&amp;cloud_password=%account[cloud_password]%</wsContactsPostData>
+    <wsContactsRefresh>180</wsContactsRefresh>
 </account>

@@ -1,133 +1,170 @@
 <?php
 
-function reportErrorMessage($errorMessage) {
+function provisioningDataDirectory()
+{
+    $configuredDirectory = getenv('ACROBITS_PROVISIONING_DATA_DIR');
+    $dataDirectory = $configuredDirectory !== false && $configuredDirectory !== ''
+        ? $configuredDirectory
+        : '/srv/data/provisioning';
+
+    return rtrim($dataDirectory, '/');
+}
+
+function normalizeCloudId($cloudId)
+{
+    $cloudId = strtoupper(rtrim((string) $cloudId, '*'));
+
+    if ($cloudId === '' || preg_match('/\A[A-Z0-9_-]+\z/', $cloudId) !== 1) {
+        throw new InvalidArgumentException('Invalid Cloud ID');
+    }
+
+    return $cloudId;
+}
+
+function reportJsonError($statusCode, $message)
+{
+    http_response_code($statusCode);
     header('Content-Type: application/json; charset=utf-8');
-    http_response_code(400);
-    echo json_encode(array("message" => $errorMessage));
+    echo json_encode(array('error' => $message), JSON_INVALID_UTF8_SUBSTITUTE);
     exit();
 }
 
-function findUserList($cloud_id) {
-    $userFile = '/srv/data/provisioning/users/' . $cloud_id . '.csv';
-    if (!file_exists($userFile)) {
-        throw new Exception("User list not found at " . $userFile);
+function reportProvisioningError($statusCode, $message)
+{
+    http_response_code($statusCode);
+    header('Content-Type: application/xml; charset=utf-8');
+    echo '<?xml version="1.0" encoding="UTF-8"?>';
+    echo '<error><message>'
+        . htmlspecialchars($message, ENT_QUOTES | ENT_XML1 | ENT_SUBSTITUTE, 'UTF-8')
+        . '</message></error>';
+    exit();
+}
+
+function findUserList($cloudId)
+{
+    $cloudId = normalizeCloudId($cloudId);
+    $userFile = provisioningDataDirectory() . '/users/' . $cloudId . '.csv';
+
+    if (!is_file($userFile) || !is_readable($userFile)) {
+        throw new RuntimeException('User list is unavailable');
     }
-    
+
     return $userFile;
 }
 
 /**
- * Open a CSV file for reading, handling UTF-8 BOM if present
- * @param string $filePath Path to the CSV file
- * @param string $mode File open mode (default 'r')
- * @return resource|false File handle positioned after BOM if present
+ * Open a CSV file for reading, handling a UTF-8 BOM if present.
+ *
+ * @param string $filePath Path to the CSV file.
+ * @param string $mode File open mode (default "r").
+ * @return resource|false File handle positioned after the BOM if present.
  */
-function fopenCSVWithBOMHandling($filePath, $mode = 'r') {
+function fopenCSVWithBOMHandling($filePath, $mode = 'r')
+{
     $handle = fopen($filePath, $mode);
-    if (!$handle) {
+    if ($handle === false) {
         return false;
     }
-    
-    // Only check for BOM when reading
-    if (strpos($mode, 'r') !== false || $mode === 'r') {
-        // Read first 3 bytes to check for BOM
+
+    if (strpos($mode, 'r') !== false) {
         $bom = fread($handle, 3);
-        
-        // If no BOM found, rewind to beginning
         if ($bom !== "\xEF\xBB\xBF") {
             rewind($handle);
         }
-        // If BOM found, file pointer is already positioned after it
     }
-    
+
     return $handle;
 }
 
-function getColumnMapping($fileHandle) {
-    // Extract column names from the first line of the CSV file
-    $columnNames = fgetcsv($fileHandle, 1000, ",");
-    // Create an empty array to store the mapping from column name to column index
-    $columnMapping = array();
-
-    // Loop through the column names and store the mapping
-    foreach ($columnNames as $index => $columnName) {
-        $columnMapping[$columnName] = $index;
+function getColumnMapping($fileHandle)
+{
+    $columnNames = fgetcsv($fileHandle, 0, ',', '"', '\\');
+    if ($columnNames === false) {
+        throw new RuntimeException('The user CSV is empty');
     }
+
+    $columnMapping = array();
+    foreach ($columnNames as $index => $columnName) {
+        $columnName = trim($columnName);
+        if ($columnName !== '') {
+            $columnMapping[$columnName] = $index;
+        }
+    }
+
     return $columnMapping;
 }
 
-function validateUserPassword($cloud_id, $cloud_username, $cloud_password) 
+function requireColumns($columnMapping, $requiredColumns)
+{
+    foreach ($requiredColumns as $columnName) {
+        if (!array_key_exists($columnName, $columnMapping)) {
+            throw new RuntimeException('The user CSV is missing a required column');
+        }
+    }
+}
+
+function validateUserPassword($cloudId, $cloudUsername, $cloudPassword)
 {
     try {
-        $userCSVFile = findUserList($cloud_id);
-        $userData = findUserDataInUserList($cloud_id, $cloud_username);
-        $storedCloudPassword = $userData['cloud_password'];
-        
-        if (strpos($storedCloudPassword, 'bcrypt:') === 0) {
-            $storedCloudPassword = substr($storedCloudPassword, 7);
-            if (!password_verify($cloud_password, $storedCloudPassword)) {
-                return [
-                    'success' => false,
-                    'error' => "Invalid password"
-                ];
-            }
-        } else {
-            // plaintext password, compare directly
-            if ($cloud_password != $storedCloudPassword) {
-                return [
-                    'success' => false,
-                    'error' => "Invalid password"
-                ];
-            }
-        }
-        
-        return [
-            'success' => true,
-            'error' => null
-        ];
-    } catch (Exception $e) {
-        return [
-            'success' => false,
-            'error' => $e->getMessage()
-        ];
+        $userData = findUserDataInUserList($cloudId, $cloudUsername);
+    } catch (RuntimeException $exception) {
+        error_log($exception->getMessage());
+        return false;
     }
+
+    $storedCloudPassword = $userData['cloud_password'];
+    if (strpos($storedCloudPassword, 'bcrypt:') === 0) {
+        return password_verify($cloudPassword, substr($storedCloudPassword, 7));
+    }
+
+    return hash_equals($storedCloudPassword, (string) $cloudPassword);
 }
 
-function findUserDataInUserList($cloud_id, $cloud_username)
+function findUserDataInUserList($cloudId, $cloudUsername)
 {
-    $userCSVFile = findUserList($cloud_id);
-    if (($handle = fopenCSVWithBOMHandling($userCSVFile, "r")) !== FALSE) {
-        $columnMapping = getColumnMapping($handle);
-        $found = false;
-        while (($data = fgetcsv($handle, 1000, ",")) !== FALSE) {
-            // Check if the current row's contact name matches the requested one
-            if (strtolower($data[$columnMapping['cloud_username']]) == strtolower($cloud_username)) {
-                $found = true;
-                break;
-            }
-        }
-        fclose($handle);
-        if ($found) {
-            $userData = array();
-            foreach ($columnMapping as $columnName => $columnIndex) {
-                $userData[$columnName] = $data[$columnIndex];
-            }
-            return $userData;
-        } else {
-            throw new Exception("User not found in user list");
-        }
+    $handle = fopenCSVWithBOMHandling(findUserList($cloudId));
+    if ($handle === false) {
+        throw new RuntimeException('Unable to open the user CSV');
     }
-    throw new Exception("Unable to open the CSV file");
+
+    try {
+        $columnMapping = getColumnMapping($handle);
+        requireColumns($columnMapping, array('cloud_username', 'cloud_password'));
+
+        while (($data = fgetcsv($handle, 0, ',', '"', '\\')) !== false) {
+            $usernameIndex = $columnMapping['cloud_username'];
+            if (!isset($data[$usernameIndex])) {
+                continue;
+            }
+
+            if (strcasecmp($data[$usernameIndex], (string) $cloudUsername) === 0) {
+                $userData = array();
+                foreach ($columnMapping as $columnName => $columnIndex) {
+                    $userData[$columnName] = isset($data[$columnIndex]) ? $data[$columnIndex] : '';
+                }
+                return $userData;
+            }
+        }
+    } finally {
+        fclose($handle);
+    }
+
+    throw new RuntimeException('User not found in user list');
 }
 
-function findExtProvXmlTemplate($cloud_id) {
-    $extProvFile = '/srv/data/provisioning/extProv/' . $cloud_id . '.xml';
-    if (!file_exists($extProvFile)) {
-        throw new Exception("Ext prov template not found at " . $extProvFile);
+function findExtProvXmlTemplate($cloudId)
+{
+    $cloudId = normalizeCloudId($cloudId);
+    $templateFile = provisioningDataDirectory() . '/extProv/' . $cloudId . '.xml';
+
+    if (!is_file($templateFile) || !is_readable($templateFile)) {
+        throw new RuntimeException('External provisioning template is unavailable');
     }
-    # read the xml file
-    $xmlString = file_get_contents($extProvFile);
+
+    $xmlString = file_get_contents($templateFile);
+    if ($xmlString === false) {
+        throw new RuntimeException('Unable to read the external provisioning template');
+    }
+
     return $xmlString;
 }
-
-?>

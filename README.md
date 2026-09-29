@@ -1,145 +1,110 @@
-This repository provides a very simple example of the Acrobits provisioning service and Acrobits contacts service.
+# Acrobits provisioning and contacts examples
 
-## Server Requirements
+This repository contains a minimal PHP example of Acrobits external provisioning and Web Service Contacts. It is intended as a starting point, not as a complete production service.
 
-The server needs a web server with PHP support, for example Apache or Nginx with PHP-FPM.
+## Requirements
 
-Requirements:
+- PHP 7.4 or newer.
+- A web server with PHP support, such as Apache or Nginx with PHP-FPM.
+- HTTPS enabled.
+- Read access from the PHP process to `/srv/data/provisioning/`.
 
-```text
-PHP 7.4 or newer
-HTTPS enabled
-Web server read access to /srv/data/provisioning/
-```
+HTTPS is required because both endpoints receive user credentials. The examples use POST so credentials do not appear in request URLs or ordinary access logs.
 
-HTTPS is required because the provisioning endpoint receives credentials in the request.
+## Install the files
 
-## Web Files
-
-Place the PHP files together in the same public web directory, for example:
+Place the PHP files in the same public web directory:
 
 ```text
 /var/www/html/provisioning/
-├── helpers.php
-├── acrobits_prov.php
-└── acrobits_contacts.php
+|-- helpers.php
+|-- acrobits_prov.php
+`-- acrobits_contacts.php
 ```
 
-## Data Files
-
-The script uses the `/srv/data/provisioning` directory for user data. This directory should be outside the web root directory so that the user data cannot be downloaded. The PHP process also needs read access to the user data.
-
-Place your data files into the data directory as shown in the example below. The filename (`SAMPLE` in the example) must match the `cloud_id`. Use capital letters for the file name.
+Store the data outside the public web root:
 
 ```text
 /srv/data/provisioning/
-├── users/
-│   └── SAMPLE.csv
-└── extProv/
-    └── SAMPLE.xml
+|-- users/
+|   `-- SAMPLE.csv
+`-- extProv/
+    `-- SAMPLE.xml
 ```
 
-There are example data files provided in the `example-data` directory. Use those as a base for your data files.
+The filename must match the Cloud ID. The scripts convert the ID to uppercase and treat a trailing `*` (the editable app version) like the live version. Only letters, digits, `_`, and `-` are accepted in Cloud IDs.
 
-## CSV User File
+For local testing, set `ACROBITS_PROVISIONING_DATA_DIR` to use another data directory.
 
-Put the user CSV file here:
+## User CSV
 
-```text
-/srv/data/provisioning/users/SAMPLE.csv
-```
-
-The CSV should follow the format from the provided `example-data`, including columns such as:
+Copy `example-data/users/SAMPLE.csv` to `/srv/data/provisioning/users/SAMPLE.csv`. Its columns are:
 
 ```csv
 cloud_username,cloud_password,username,password,display_name,first_name,last_name,avatar,phone_number1
 ```
 
-The provisioning endpoint looks up users by `cloud_username`.
+- `cloud_username` and `cloud_password` authenticate provisioning and contacts requests.
+- `username` and `password` are the SIP credentials returned in Account XML.
+- `phone_number1` through `phone_number5` may contain either a number or `label:number`, such as `Mobile:+12025550101`.
 
-The `cloud_password` value may be stored as a bcrypt hash using this format:
+The sample `user001` password is plain text so the commands below work immediately. Production passwords should use `bcrypt:<hash>`. Generate a hash with:
+
+```bash
+php -r 'echo "bcrypt:", password_hash("replace-with-a-strong-password", PASSWORD_BCRYPT), PHP_EOL;'
+```
+
+Replace every sample password and SIP credential before deployment.
+
+## Account XML
+
+Copy `example-data/extProv/SAMPLE.xml` to `/srv/data/provisioning/extProv/SAMPLE.xml` and replace `customer-domain.example` with the deployment hostname.
+
+Placeholders such as `{username}`, `{password}`, and `{display_name}` are filled from the authenticated CSV row. `{cloud_password}` receives the password submitted by the app, not the stored CSV value, so a bcrypt hash is never returned to the client.
+
+The sample XML also configures Web Service Contacts to send the Cloud ID and activation credentials in a form-encoded POST request.
+
+## Cloud Softphone configuration
+
+Configure initial external provisioning as follows:
 
 ```text
-bcrypt:<hash>
+InitialProvisioningUrl      = https://customer-domain.example/provisioning/acrobits_prov.php
+InitialProvisioningMethod   = POST
+InitialProvisioningPostData = cloud_id=%fullcode%&cloud_username=%username%&cloud_password=%password%
 ```
 
-Plain text `cloud_password` values are also supported, but bcrypt is recommended.
+The ampersands must be XML-escaped as `&amp;` when these settings are written inside XML.
 
-The sample `user001` row uses `SAMPLE_PASSWORD` so the quick test below can work immediately after the example data is copied into place. Replace sample passwords with customer-specific values before production use.
-
-## XML Provisioning Template
-
-Put the XML provisioning template here:
-
-```text
-/srv/data/provisioning/extProv/SAMPLE.xml
-```
-
-The XML file may contain placeholders that match CSV column names.
-
-Any column from the CSV can be returned in the external provisioning response. To return a value, add the required XML node and use the CSV column name as a placeholder in the format `{column_name}`.
-
-The `cloud_password` column is used to validate the incoming request. After validation succeeds, `{cloud_password}` in the XML response is replaced with the submitted password, not the stored CSV value. This avoids returning a stored bcrypt hash in the provisioning response.
-
-For example, if the CSV contains these columns:
-
-```csv
-cloud_username,cloud_password,username,password,display_name
-```
-
-then the XML template can use any of those columns:
-
-```xml
-<account>
-    <title>{display_name}</title>
-    <acrobitsDisplayName>{display_name}</acrobitsDisplayName>
-    <cloud_username>{cloud_username}</cloud_username>
-    <cloud_password>{cloud_password}</cloud_password>
-    <username>{username}</username>
-    <password>{password}</password>
-</account>
-```
-
-When provisioning is requested, placeholders such as `{username}`, `{password}`, and `{display_name}` are replaced with values from the matching CSV row.
-
-## Endpoint URLs
-
-Provisioning endpoint:
-
-```text
-https://customer-domain.example/provisioning/acrobits_prov.php?cloud_id=SAMPLE&cloud_username=user001&cloud_password=SAMPLE_PASSWORD
-```
-
-Contacts endpoint:
-
-```text
-https://customer-domain.example/provisioning/acrobits_contacts.php?cloud_id=SAMPLE&cloud_username=user001
-```
-
-Replace `customer-domain.example`, `SAMPLE`, `user001`, and `SAMPLE_PASSWORD` with the customer's real values.
-
-## Quick Test
+## Test
 
 Test provisioning:
 
 ```bash
-curl "https://customer-domain.example/provisioning/acrobits_prov.php?cloud_id=SAMPLE&cloud_username=user001&cloud_password=SAMPLE_PASSWORD"
+curl --fail-with-body \
+  --data-urlencode 'cloud_id=SAMPLE' \
+  --data-urlencode 'cloud_username=user001' \
+  --data-urlencode 'cloud_password=SAMPLE_PASSWORD' \
+  https://customer-domain.example/provisioning/acrobits_prov.php
 ```
-
-Expected result: XML provisioning output.
 
 Test contacts:
 
 ```bash
-curl "https://customer-domain.example/provisioning/acrobits_contacts.php?cloud_id=SAMPLE&cloud_username=user001"
+curl --fail-with-body \
+  --data-urlencode 'cloud_id=SAMPLE' \
+  --data-urlencode 'cloud_username=user001' \
+  --data-urlencode 'cloud_password=SAMPLE_PASSWORD' \
+  https://customer-domain.example/provisioning/acrobits_contacts.php
 ```
 
-Expected result: JSON contacts output.
+Successful provisioning returns Account XML. Successful contacts requests return a JSON object containing a `contacts` array. Missing parameters return `400`, rejected credentials return `403`, unsupported methods return `405`, and unavailable server data returns `500`.
 
-## Security Notes
+## Production notes
 
-Keep `/srv/data/provisioning/` outside the public web directory. The CSV file may contain passwords and must not be directly downloadable.
-
-Make sure only the web server process can read the provisioning data files.
-
-Use HTTPS for all provisioning and contacts requests.
+- Keep `/srv/data/provisioning/` outside the web root and restrict it to the service account that needs it.
+- Use HTTPS and bcrypt activation-password hashes.
+- Do not enable wildcard CORS unless browser clients genuinely require it and its exposure is acceptable.
+- Add rate limiting and monitoring at the web-server or application layer.
+- For larger directories, implement `Last-Modified` and `304 Not Modified`; clients refresh contacts frequently.
+- Replace the CSV backend with a suitable authenticated data store when the deployment requires concurrent administration or substantial scale.
